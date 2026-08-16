@@ -18,6 +18,11 @@ export interface Memory {
   updated_at: number
   access_count: number
   last_accessed: number | null
+  // Living-memory fields
+  anchor_path: string | null
+  anchor_hash: string | null
+  tokens_saved: number
+  tokens_spent: number
 }
 
 export interface Session {
@@ -36,6 +41,9 @@ export interface RecallResult {
   scope: 'project' | 'global'
   created_at: number
   relevance_hint?: string
+  /** True bila memory ter-anchor ke file yang isinya sudah berubah (fakta mungkin basi). */
+  stale?: boolean
+  anchor_path?: string | null
 }
 
 export interface StoreConfig {

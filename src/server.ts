@@ -8,8 +8,8 @@ import { contextStatusSchema, contextStatusHandler } from './tools/context-statu
 
 export function createServer(project: string): McpServer {
   const server = new McpServer({
-    name: 'cacheai-mcp',
-    version: '0.2.0',
+    name: 'engram-mcp',
+    version: '1.0.0',
   })
 
   server.registerTool(

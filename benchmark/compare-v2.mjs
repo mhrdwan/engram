@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { env } from '@xenova/transformers'; env.allowLocalModels = true;
 /**
- * cacheAI v2 Benchmark
- * Compares: Naked | RTK | cacheAI v1 | cacheAI v2 (optimized)
+ * Engram v2 Benchmark
+ * Compares: Naked | RTK | Engram v1 | Engram v2 (optimized)
  *
  * v2 improvements:
  *   - Deduplication (Jaccard similarity) → fewer memories, less noise in recall
@@ -60,7 +60,7 @@ function row(label, naked, rtk, v1, v2) {
 
 (async () => {
 // ─── Setup ────────────────────────────────────────────────────────────────────
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cacheai-bench2-'))
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'engram-bench2-'))
 const dbPath = path.join(tmpDir, 'bench.db')
 openDb(dbPath)
 
@@ -148,10 +148,10 @@ row('ls -la (100 files)', lsNaked, lsRtk, lsV1, lsV2)
 // ─── SCENARIO 5: Cross-session ───────────────────────────────────────────────
 sep('SCENARIO 5: Cross-session context (new session, same project)')
 
-createSession({project:'bench', summary:'Built cacheAI v2: added deduplication (Jaccard), relevance scoring, pruning, smarter recall, context_status tool. 14/14 tests pass. Ready for benchmark.', started_at: Date.now()-7200000})
+createSession({project:'bench', summary:'Built Engram v2: added deduplication (Jaccard), relevance scoring, pruning, smarter recall, context_status tool. 14/14 tests pass. Ready for benchmark.', started_at: Date.now()-7200000})
 
 // Naked/RTK: user must brief again manually
-const manualBrief = `Project: cacheAI MCP server. Stack: TypeScript + SQLite FTS5 + MCP SDK v1.30.
+const manualBrief = `Project: Engram MCP server. Stack: TypeScript + SQLite FTS5 + MCP SDK v1.30.
 Tools: remember, recall, forget, list_memories, session_summary, context_status.
 v2 adds: dedup (Jaccard), relevance scoring, pruning, smarter recall.
 Status: 14/14 tests pass. Config in opencode.json.`
@@ -207,7 +207,7 @@ console.log(
 )
 
 // ─── TOTAL ────────────────────────────────────────────────────────────────────
-sep('TOTAL SUMMARY — Naked vs RTK vs cacheAI v1 vs cacheAI v2')
+sep('TOTAL SUMMARY — Naked vs RTK vs Engram v1 vs Engram v2')
 
 const totNaked = gitNaked + npmNaked + tscNaked + lsNaked + xsNaked
 const totRtk   = gitRtk   + npmRtk   + tscRtk   + lsRtk   + xsRtk
@@ -243,8 +243,8 @@ console.log()
 console.log(`${BOLD}  When to use what:${RESET}`)
 console.log(`  ${RED}●${RESET} Naked       — don't. Context bloats, AI forgets, re-brief constantly`)
 console.log(`  ${YELLOW}●${RESET} RTK         — best for large bash output (git, ls, npm, tsc). Use always.`)
-console.log(`  ${GREEN}●${RESET} cacheAI v1  — persistent memory. Good baseline.`)
-console.log(`  ${BLUE}●${RESET} cacheAI v2  — v1 + dedup + smart ranking + pruning + startup injection`)
+console.log(`  ${GREEN}●${RESET} Engram v1  — persistent memory. Good baseline.`)
+console.log(`  ${BLUE}●${RESET} Engram v2  — v1 + dedup + smart ranking + pruning + startup injection`)
 console.log(`  ${CYAN}●${RESET} RTK + v2    — optimal combo: compress output + lean persistent memory`)
 console.log()
 

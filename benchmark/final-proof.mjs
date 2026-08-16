@@ -12,9 +12,9 @@ function run(cmd) {
 }
 
 (async () => {
-  openDb('/Users/apple/Desktop/cacheAI/.cacheai/memory.db')
+  openDb('/Users/apple/Desktop/Engram/.engram/memory.db')
 
-  console.log('--- PERBANDINGAN TOKEN IN/OUT: NAKED vs RTK vs RTK+cacheAI ---\\n')
+  console.log('--- PERBANDINGAN TOKEN IN/OUT: NAKED vs RTK vs RTK+Engram ---\\n')
 
   // MENSIMULASIKAN OUTPUT TERMINAL BESAR (Grep code base)
   // Misal ada 50 baris grep
@@ -24,7 +24,7 @@ function run(cmd) {
 
   const compressedOutput = 'RTK Summary: Ditemukan 50 fungsi terkait chunk processing di node_modules/stream/index.js. Fungsi utama: processChunk_0 hingga processChunk_49.'
 
-  // Memastikan data tersimpan di cacheAI
+  // Memastikan data tersimpan di Engram
   await createMemory({
     content: compressedOutput,
     type: 'fact',
@@ -45,8 +45,8 @@ function run(cmd) {
   const rtkCrossSession = tokens(compressedOutput) // Sesi baru, grep ulang, dikompres ulang
   const rtkTotal = rtkIn + rtkCrossSession
 
-  // Skenario 3: RTK + cacheAI
-  // RTK ngompres output di awal, cacheAI menyimpan. Di sesi baru, cukup recall semantic
+  // Skenario 3: RTK + Engram
+  // RTK ngompres output di awal, Engram menyimpan. Di sesi baru, cukup recall semantic
   const rtkCacheIn = tokens(compressedOutput) // Output awal
   // Sesi baru, recall tanpa menjalankan grep
   const recallResults = await searchMemories({ query: 'how are chunks processed?', project: 'bench' })
@@ -58,7 +58,7 @@ function run(cmd) {
   const g = (text) => `\\x1b[32m${text}\\x1b[0m`
   const c = (text) => `\\x1b[36m${text}\\x1b[0m`
 
-  console.log(b('1. NAKED (Tanpa RTK, Tanpa cacheAI)'))
+  console.log(b('1. NAKED (Tanpa RTK, Tanpa Engram)'))
   console.log(`- Sesi 1 (Grep Output Raw)      : ${r(nakedIn + ' tokens')}`)
   console.log(`- Sesi 2 (Lupa -> Grep Ulang)   : ${r(nakedCrossSession + ' tokens')}`)
   console.log(`- ${b('Total Token Terbuang')}        : ${r(nakedTotal + ' tokens')}\\n`)
@@ -68,7 +68,7 @@ function run(cmd) {
   console.log(`- Sesi 2 (Lupa -> Grep Ulang)   : ${g(rtkCrossSession + ' tokens')} (-90%)`)
   console.log(`- ${b('Total Token Terbuang')}        : ${g(rtkTotal + ' tokens')} (-90% dari Naked)\\n`)
 
-  console.log(b('3. RTK + cacheAI (The Ultimate Memory)'))
+  console.log(b('3. RTK + Engram (The Ultimate Memory)'))
   console.log(`- Sesi 1 (Grep Compressed)      : ${g(rtkCacheIn + ' tokens')} (-90%)`)
   console.log(`- Sesi 2 (Ingat -> Recall RAG)  : ${c(rtkCacheCrossSession + ' tokens')} (No terminal command needed!)`)
   console.log(`- ${b('Total Token Dipakai')}         : ${c(rtkCacheTotal + ' tokens')} (-96% dari Naked)\\n`)
@@ -76,6 +76,6 @@ function run(cmd) {
   console.log('--- KESIMPULAN ---')
   console.log('- Naked = AI bodoh, lupa terus, token jebol.')
   console.log('- RTK Only = Token irit, tapi AI tetep lupa tiap ganti sesi/context geser.')
-  console.log('- RTK + cacheAI = Token irit pol, AI ingat segalanya lintas sesi dengan Semantic Search.')
+  console.log('- RTK + Engram = Token irit pol, AI ingat segalanya lintas sesi dengan Semantic Search.')
 
 })();

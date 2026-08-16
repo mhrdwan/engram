@@ -10,7 +10,7 @@ import { env } from '@xenova/transformers'
 env.allowLocalModels = true
 
 ;(async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cacheai-bench3-'))
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'engram-bench3-'))
   const dbPath = path.join(tmpDir, 'bench.db')
   openDb(dbPath)
 

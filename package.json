@@ -1,10 +1,11 @@
 {
-  "name": "cacheai-mcp",
-  "version": "0.1.0",
-  "description": "Persistent memory MCP server for AI agents — remember across sessions, never forget mid-session",
+  "name": "engram-mcp",
+  "version": "1.0.0",
+  "description": "Engram — the self-maintaining memory layer for coding agents. Persistent, token-frugal, self-invalidating memory over MCP (SQLite + FTS5 + local vector RAG).",
   "type": "module",
   "bin": {
-    "cacheai-mcp": "./build/index.js"
+    "engram": "./build/index.js",
+    "engram-mcp": "./build/index.js"
   },
   "scripts": {
     "build": "tsc && chmod 755 build/index.js",
@@ -21,8 +22,11 @@
     "memory",
     "ai",
     "agent",
+    "engram",
     "persistent",
-    "context"
+    "context",
+    "rag",
+    "token-efficiency"
   ],
   "license": "MIT",
   "dependencies": {

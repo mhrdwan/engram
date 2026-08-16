@@ -1,10 +1,67 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import { getDb } from './db.js'
-import { embedText, cosineSimilarity } from './embedder.js'
+import { safeEmbedText, cosineSimilarity } from './embedder.js'
+import { computeAnchorHash, isStale } from './anchor.js'
 import type { Memory, MemoryType, RecallResult } from '../types.js'
 
 function now(): number {
   return Date.now()
+}
+
+/** Resolusi path anchor ke absolut (relatif → terhadap cwd = folder project). */
+function resolveAnchor(p: string): string {
+  return path.resolve(p)
+}
+
+/** Estimasi token dari sebuah teks (konvensi ceil(bytes/4)). */
+export function estTokens(text: string): number {
+  return Math.ceil(Buffer.byteLength(text ?? '', 'utf8') / 4)
+}
+
+// Saat sebuah memory di-recall, ia menghemat biaya menurunkan-ulang fakta itu
+// (baca file dsb). Kita kreditkan ~faktor ini × ukurannya sebagai "tokens_saved".
+const SAVE_FACTOR = 3
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+/** Parse kolom `tags` (JSON) dengan aman — baris legacy/migrasi bisa saja rusak. */
+function parseTags(raw: string): string[] {
+  try {
+    const v = JSON.parse(raw)
+    return Array.isArray(v) ? v.map(String) : []
+  } catch {
+    return []
+  }
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+// Bobot per tipe — keputusan & arsitektur paling berharga.
+const TYPE_WEIGHT: Record<string, number> = {
+  decision: 7, architecture: 6, bug: 5,
+  preference: 4, fact: 3, session: 2, general: 1,
+}
+
+/**
+ * Skor relevansi non-semantik yang dipakai untuk list, konteks sesi, dan prune.
+ *
+ * Rumus lama (`access_count*2 + created_at/1e6`) praktis rusak: suku created_at
+ * (~1.75 juta) mendominasi total sehingga access_count jadi noise dan urutan
+ * de-facto hanya "terbaru". Di sini recency dinormalisasi ke 0..1 sehingga
+ * frekuensi akses benar-benar berpengaruh.
+ */
+function memoryScore(
+  row: { type: string; access_count: number; created_at: number },
+  nowTs: number
+): number {
+  // clamp: created_at di masa depan (clock skew / data korup) tak boleh meledakkan skor.
+  const ageDays = Math.max(0, (nowTs - row.created_at) / DAY_MS)
+  const recency = 1 / (1 + ageDays / 14) // half-life ~14 hari, terikat 0..1
+  const typeW = TYPE_WEIGHT[row.type] ?? 1
+  return row.access_count * 1.0 + recency * 3.0 + typeW * 0.2
 }
 
 // ─── DEDUPLICATION ────────────────────────────────────────────────────────────
@@ -62,6 +119,8 @@ export async function createMemory(params: {
   project: string
   scope: 'project' | 'global'
   skipDedup?: boolean
+  /** Path file sumber fakta ini — memory jadi self-invalidating (deteksi basi). */
+  anchor?: string
 }): Promise<CreateResult> {
   const db = getDb()
 
@@ -72,39 +131,65 @@ export async function createMemory(params: {
       project: params.project,
       scope: params.scope,
     })
-    if (existingId) {
+    // getMemoryById bisa null bila baris terhapus (race dgn forget) antara
+    // findDuplicate dan sini — kalau begitu, jatuh ke pembuatan baru di bawah.
+    const existing = existingId ? getMemoryById(existingId) : null
+    if (existingId && existing) {
       const ts = now()
-      const existing = getMemoryById(existingId)!
       const mergedTags = [...new Set([...existing.tags, ...params.tags])]
-      
-      // Update with new content and optionally update embedding
-      const vector = await embedText(params.content)
-      const buffer = Buffer.from(new Float32Array(vector).buffer)
 
-      db.prepare(
-        'UPDATE memories SET content = ?, tags = ?, updated_at = ?, embedding = ? WHERE id = ?'
-      ).run(params.content, JSON.stringify(mergedTags), ts, buffer, existingId)
-      
-      return {
-        memory: getMemoryById(existingId)!,
-        deduplicated: true,
-        mergedInto: existingId,
+      const longer = params.content.length >= existing.content.length ? params.content : existing.content
+      const shorter = params.content.length >= existing.content.length ? existing.content : params.content
+
+      // True-duplicate (yang pendek terkandung di panjang, atau nyaris identik) → simpan yang lengkap.
+      // Berbeda substansial meski token overlap tinggi → GABUNG keduanya, jangan buang salah satu.
+      const contained = longer.toLowerCase().includes(shorter.toLowerCase())
+      const veryClose = jaccard(tokenize(existing.content), tokenize(params.content)) >= 0.9
+      const keptContent = contained || veryClose ? longer : `${existing.content} | ${params.content}`
+
+      const vector = await safeEmbedText(keptContent)
+      if (vector) {
+        const buffer = Buffer.from(new Float32Array(vector).buffer)
+        db.prepare(
+          'UPDATE memories SET content = ?, tags = ?, updated_at = ?, embedding = ? WHERE id = ?'
+        ).run(keptContent, JSON.stringify(mergedTags), ts, buffer, existingId)
+      } else {
+        // Embedding tidak tersedia → tetap update teks/tags (jangan hapus embedding lama).
+        db.prepare(
+          'UPDATE memories SET content = ?, tags = ?, updated_at = ? WHERE id = ?'
+        ).run(keptContent, JSON.stringify(mergedTags), ts, existingId)
       }
+
+      // Anchor yang diberikan saat merge tidak boleh hilang diam-diam.
+      if (params.anchor) {
+        const ap = resolveAnchor(params.anchor)
+        db.prepare('UPDATE memories SET anchor_path = ?, anchor_hash = ? WHERE id = ?')
+          .run(ap, computeAnchorHash(ap), existingId)
+      }
+
+      const updated = getMemoryById(existingId)
+      if (updated) {
+        return { memory: updated, deduplicated: true, mergedInto: existingId }
+      }
+      // baris hilang tepat setelah update (sangat jarang) → lanjut buat baru.
     }
   }
 
   const id = randomUUID()
   const ts = now()
-  const vector = await embedText(params.content)
-  const buffer = Buffer.from(new Float32Array(vector).buffer)
+  const vector = await safeEmbedText(params.content)
+  const buffer = vector ? Buffer.from(new Float32Array(vector).buffer) : null
+
+  const anchorPath = params.anchor ? resolveAnchor(params.anchor) : null
+  const anchorHash = anchorPath ? computeAnchorHash(anchorPath) : null
 
   db.prepare(`
-    INSERT INTO memories (id, content, type, tags, project, scope, created_at, updated_at, access_count, last_accessed, embedding)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+    INSERT INTO memories (id, content, type, tags, project, scope, created_at, updated_at, access_count, last_accessed, embedding, anchor_path, anchor_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)
   `).run(
     id, params.content, params.type,
     JSON.stringify(params.tags),
-    params.project, params.scope, ts, ts, buffer
+    params.project, params.scope, ts, ts, buffer, anchorPath, anchorHash
   )
 
   return { memory: getMemoryById(id)!, deduplicated: false }
@@ -130,12 +215,10 @@ export function listMemories(params: {
   let where = '1=1'
   const bindings: (string | number)[] = []
 
-  if (scope === 'project') {
-    where += " AND (project = ? OR scope = 'global')"
-    bindings.push(project)
-  } else if (scope === 'global') {
+  if (scope === 'global') {
     where += " AND scope = 'global'"
   } else {
+    // project & all → project ini + global
     where += " AND (project = ? OR scope = 'global')"
     bindings.push(project)
   }
@@ -150,15 +233,19 @@ export function listMemories(params: {
     bindings.push(`%"${tag}"%`)
   }
 
-  bindings.push(limit)
+  // Ambil kandidat lalu ranking di JS (rumus SQL lama membuat access_count jadi noise).
+  // ORDER BY sebelum LIMIT: kalau set > cap, pertahankan yang paling sering diakses &
+  // terbaru sebagai kandidat — bukan subset arbitrer (biasanya baris tertua).
   const rows = db.prepare(
-    `SELECT *,
-      (access_count * 2.0 + (created_at / 1000000.0)) as relevance_score
-     FROM memories WHERE ${where}
-     ORDER BY relevance_score DESC LIMIT ?`
+    `SELECT * FROM memories WHERE ${where} ORDER BY access_count DESC, created_at DESC LIMIT 2000`
   ).all(...bindings) as RawRow[]
 
-  return rows.map(rowToMemory)
+  const nowTs = now()
+  return rows
+    .map(r => ({ r, s: memoryScore(r, nowTs) }))
+    .sort((a, b) => b.s - a.s || b.r.created_at - a.r.created_at)
+    .slice(0, limit)
+    .map(x => rowToMemory(x.r))
 }
 
 // ─── SEARCH (Hybrid: Vector RAG + FTS5 + Relevance) ──────────────────────────
@@ -172,8 +259,8 @@ export async function searchMemories(params: {
   const db = getDb()
   const { query, project, scope = 'all', limit = 10 } = params
 
-  // 1. Get embedding for the query
-  const queryVector = await embedText(query)
+  // 1. Embedding query — bisa null bila embedding dimatikan/gagal (keyword-only).
+  const queryVector = await safeEmbedText(query)
 
   // 2. FTS5 OR match (broad match)
   const queryTokens = query
@@ -181,46 +268,48 @@ export async function searchMemories(params: {
     .trim()
     .split(/\s+/)
     .filter(t => t.length > 1)
-  
+
   const ftsQuery = queryTokens.length > 0 ? queryTokens.join(' OR ') : ''
 
   let scopeFilter = '1=1'
   const bindings: (string | number)[] = []
 
-  if (scope === 'project') {
-    scopeFilter = "(project = ? OR scope = 'global')"
-    bindings.push(project)
-  } else if (scope === 'global') {
+  if (scope === 'global') {
     scopeFilter = "scope = 'global'"
   } else {
     scopeFilter = "(project = ? OR scope = 'global')"
     bindings.push(project)
   }
 
-  // We pull a larger candidate pool to rerank via vectors
-  // If FTS matches nothing (e.g. synonym used), we fallback to fetching recent memories
+  // Pool kandidat lebih besar untuk di-rerank via vektor.
   let candidates: (RawRow & { fts_rank: number })[] = []
-  
+
   if (ftsQuery) {
-    candidates = db.prepare(`
-      SELECT m.*, rank as fts_rank
-      FROM memories_fts
-      JOIN memories m ON memories_fts.id = m.id
-      WHERE memories_fts MATCH ? AND ${scopeFilter.replace(/project/g, 'm.project').replace(/scope/g, 'm.scope')}
-      LIMIT 100
-    `).all(ftsQuery, ...bindings) as any[]
+    try {
+      candidates = db.prepare(`
+        SELECT m.*, rank as fts_rank
+        FROM memories_fts
+        JOIN memories m ON memories_fts.id = m.id
+        WHERE memories_fts MATCH ? AND ${scopeFilter.replace(/project/g, 'm.project').replace(/scope/g, 'm.scope')}
+        LIMIT 100
+      `).all(ftsQuery, ...bindings) as (RawRow & { fts_rank: number })[]
+    } catch (err) {
+      // Query FTS5 malformed (token spesial) → jangan jatuhkan recall, lanjut ke fallback.
+      console.error('[engram] FTS query failed, using recency fallback:', errMsg(err))
+      candidates = []
+    }
   }
 
-  // Fallback / padding: grab top 50 recent memories in scope to catch semantic matches that missed keyword
+  // Fallback / padding: ambil memory terbaru dalam scope untuk menangkap
+  // kecocokan semantik yang lolos dari keyword.
   if (candidates.length < 50) {
     const recents = db.prepare(`
       SELECT *, 0 as fts_rank
       FROM memories
       WHERE ${scopeFilter}
       ORDER BY created_at DESC LIMIT 50
-    `).all(...bindings) as any[]
-    
-    // merge avoiding duplicates
+    `).all(...bindings) as (RawRow & { fts_rank: number })[]
+
     const seen = new Set(candidates.map(c => c.id))
     for (const r of recents) {
       if (!seen.has(r.id)) {
@@ -230,55 +319,58 @@ export async function searchMemories(params: {
     }
   }
 
-  // 3. Score and Rerank
-  const typeWeight: Record<string, number> = {
-    decision: 7, architecture: 6, bug: 5,
-    preference: 4, fact: 3, session: 2, general: 1,
-  }
-
+  // 3. Score & rerank
+  const nowTs = now()
   const scored = candidates.map(row => {
-    // calculate semantic similarity if embedding exists
     let semanticScore = 0
-    if (row.embedding) {
+    if (queryVector && row.embedding) {
       const dbVector = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4)
       semanticScore = cosineSimilarity(queryVector, Array.from(dbVector))
     }
 
+    const ageDays = Math.max(0, (nowTs - row.created_at) / DAY_MS)
+    const recency = 1 / (1 + ageDays / 14)
+
     const final_score = (
-      (semanticScore * 50) +               // Vector sim is strong signal (0-1 range * 50)
-      (Math.abs(row.fts_rank) * -0.5) +    // FTS rank (closer to 0 is better)
-      (row.access_count * 0.5) +           // Hit count
-      ((typeWeight[row.type] ?? 1) * 0.3)  // Priority
+      (semanticScore * 50) +               // sinyal vektor kuat (0-1 * 50)
+      (Math.abs(row.fts_rank) * -0.5) +    // rank FTS (mendekati 0 lebih baik)
+      (row.access_count * 0.5) +           // frekuensi akses
+      ((TYPE_WEIGHT[row.type] ?? 1) * 0.3) + // prioritas tipe
+      (recency * 2)                        // sedikit dorongan untuk yang baru
     )
 
     return { ...row, semanticScore, final_score }
   })
 
-  // Sort by final score
+  // Bila embedding tersedia → boleh menyaring pakai ambang semantik.
+  // Bila tidak (queryVector null) → andalkan keyword: hanya simpan yang match FTS.
   const ranked = scored
     .sort((a, b) => b.final_score - a.final_score)
-    .filter(r => r.semanticScore > 0.3 || r.fts_rank < 0) // drop if totally irrelevant
+    .filter(r => (queryVector ? r.semanticScore > 0.3 : false) || r.fts_rank < 0)
     .slice(0, limit)
 
-  // 4. Update access stats
+  // 4. Update statistik akses + ROI ledger (recall menghemat penurunan-ulang fakta).
   if (ranked.length > 0) {
     const updateStmt = db.prepare(
-      'UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?'
+      'UPDATE memories SET access_count = access_count + 1, last_accessed = ?, tokens_saved = tokens_saved + ? WHERE id = ?'
     )
     const ts = now()
-    db.transaction((ids: string[]) => {
-      for (const id of ids) updateStmt.run(ts, id)
-    })(ranked.map(r => r.id))
+    db.transaction((rows: typeof ranked) => {
+      for (const r of rows) updateStmt.run(ts, estTokens(r.content) * SAVE_FACTOR, r.id)
+    })(ranked)
   }
 
   return ranked.map(r => ({
     id: r.id,
     content: r.content,
     type: r.type as MemoryType,
-    tags: JSON.parse(r.tags) as string[],
+    tags: parseTags(r.tags),
     scope: r.scope as 'project' | 'global',
     created_at: r.created_at,
     relevance_hint: `sim:${r.semanticScore.toFixed(2)}`,
+    // Self-invalidating: cek apakah file sumber fakta sudah berubah.
+    stale: isStale(r.anchor_path, r.anchor_hash),
+    anchor_path: r.anchor_path,
   }))
 }
 
@@ -311,12 +403,25 @@ export function pruneMemories(params: {
   let evicted = result.changes
 
   if (total > maxTotal) {
-    const victims = db.prepare(`
-      SELECT id FROM memories
+    // Pilih korban bernilai TERENDAH: skor recency/akses + sinyal ROI. Memory yang
+    // cuma dibebankan (di-inject) tapi tak pernah menghemat (net negatif) dibuang duluan.
+    const rows = db.prepare(`
+      SELECT id, type, access_count, created_at, tokens_saved, tokens_spent FROM memories
       WHERE project = ? AND type NOT IN ('decision', 'architecture')
-      ORDER BY (access_count * 2 + created_at / 1000000.0) ASC
-      LIMIT ?
-    `).all(project, total - maxTotal) as { id: string }[]
+    `).all(project) as {
+      id: string; type: string; access_count: number; created_at: number
+      tokens_saved: number; tokens_spent: number
+    }[]
+
+    const nowTs = now()
+    // Sinyal ROI dibatasi ±3 agar sebanding dengan suku memoryScore (recency/akses/tipe),
+    // bukan mendominasi dgn tokens_saved historis yang tak berbatas.
+    const roiSignal = (r: { tokens_saved: number; tokens_spent: number }) =>
+      Math.max(-3, Math.min(3, (r.tokens_saved - r.tokens_spent) / 500))
+    const victims = rows
+      .map(r => ({ id: r.id, s: memoryScore(r, nowTs) + roiSignal(r) }))
+      .sort((a, b) => a.s - b.s)
+      .slice(0, total - maxTotal)
 
     const del = db.prepare('DELETE FROM memories WHERE id = ?')
     db.transaction((ids: string[]) => { for (const id of ids) del.run(id) })(victims.map(v => v.id))
@@ -348,40 +453,100 @@ export function listSessions(project: string, limit = 10) {
 export function getRecentContext(project: string): string | null {
   const db = getDb()
   const session = db.prepare('SELECT summary FROM sessions WHERE project = ? ORDER BY ended_at DESC LIMIT 1').get(project) as any
-  const topMemories = db.prepare(`
-    SELECT content, type FROM memories
+
+  const rows = db.prepare(`
+    SELECT id, content, type, access_count, created_at, anchor_path, anchor_hash FROM memories
     WHERE (project = ? OR scope = 'global')
-    ORDER BY (access_count * 2 + created_at / 1000000.0) DESC
-    LIMIT 5
-  `).all(project) as any[]
+    ORDER BY access_count DESC, created_at DESC
+    LIMIT 500
+  `).all(project) as {
+    id: string; content: string; type: string; access_count: number; created_at: number
+    anchor_path: string | null; anchor_hash: string | null
+  }[]
+
+  const nowTs = now()
+  const topMemories = rows
+    .map(r => ({ r, s: memoryScore(r, nowTs) }))
+    .sort((a, b) => b.s - a.s || b.r.created_at - a.r.created_at)
+    .slice(0, 5)
+    .map(x => x.r)
 
   if (!session && topMemories.length === 0) return null
 
+  // ROI ledger: memory yang di-inject dibayar biayanya (tokens_spent).
+  if (topMemories.length > 0) {
+    const spend = db.prepare('UPDATE memories SET tokens_spent = tokens_spent + ? WHERE id = ?')
+    db.transaction((ms: typeof topMemories) => {
+      for (const m of ms) spend.run(estTokens(m.content), m.id)
+    })(topMemories)
+  }
+
   const parts: string[] = []
   if (session) parts.push(`Last session: ${session.summary}`)
-  if (topMemories.length > 0) parts.push('Key facts: ' + topMemories.map(m => `[${m.type}] ${m.content}`).join(' | '))
+  if (topMemories.length > 0) {
+    parts.push('Key facts: ' + topMemories
+      .map(m => `${isStale(m.anchor_path, m.anchor_hash) ? '⚠️stale ' : ''}[${m.type}] ${m.content}`)
+      .join(' | '))
+  }
   return parts.join('\n')
 }
 
-export function getStats(project: string) {
+export interface MemoryStats {
+  total: number
+  byType: { type: string; n: number }[]
+  neverAccessed: number
+  sessions: number
+  tokensSaved: number
+  tokensSpent: number
+  netTokens: number
+  anchored: number
+  stale: number
+}
+
+// Batas berapa file anchor yang di-rehash saat stats, agar satu panggilan stats
+// tak memblok event loop lama bila ada ribuan anchor / anchor di mount lambat.
+const STALE_SCAN_CAP = 2000
+
+export function getStats(project: string): MemoryStats {
   const db = getDb()
-  const total = (db.prepare("SELECT COUNT(*) as n FROM memories WHERE project = ? OR scope = 'global'").get(project) as any).n
-  const byType = db.prepare("SELECT type, COUNT(*) as n FROM memories WHERE project = ? OR scope = 'global' GROUP BY type").all(project)
-  const neverAccessed = (db.prepare("SELECT COUNT(*) as n FROM memories WHERE project = ? AND access_count = 0").get(project) as any).n
-  const sessions = (db.prepare('SELECT COUNT(*) as n FROM sessions WHERE project = ?').get(project) as any).n
-  return { total, byType, neverAccessed, sessions }
+  const total = (db.prepare("SELECT COUNT(*) as n FROM memories WHERE project = ? OR scope = 'global'").get(project) as { n: number }).n
+  const byType = db.prepare("SELECT type, COUNT(*) as n FROM memories WHERE project = ? OR scope = 'global' GROUP BY type").all(project) as { type: string; n: number }[]
+  const neverAccessed = (db.prepare("SELECT COUNT(*) as n FROM memories WHERE project = ? AND access_count = 0").get(project) as { n: number }).n
+  const sessions = (db.prepare('SELECT COUNT(*) as n FROM sessions WHERE project = ?').get(project) as { n: number }).n
+
+  // ROI ledger — netto token yang dihemat vs dibebani memory.
+  const roi = db.prepare(
+    "SELECT COALESCE(SUM(tokens_saved),0) as saved, COALESCE(SUM(tokens_spent),0) as spent FROM memories WHERE project = ? OR scope = 'global'"
+  ).get(project) as { saved: number; spent: number }
+
+  // Self-invalidating — berapa memory ter-anchor yang sekarang basi (dibatasi).
+  const anchored = db.prepare(
+    "SELECT anchor_path, anchor_hash FROM memories WHERE (project = ? OR scope = 'global') AND anchor_path IS NOT NULL LIMIT ?"
+  ).all(project, STALE_SCAN_CAP) as { anchor_path: string | null; anchor_hash: string | null }[]
+  let stale = 0
+  for (const a of anchored) if (isStale(a.anchor_path, a.anchor_hash)) stale++
+
+  return {
+    total, byType, neverAccessed, sessions,
+    tokensSaved: roi.saved, tokensSpent: roi.spent, netTokens: roi.saved - roi.spent,
+    anchored: anchored.length, stale,
+  }
 }
 
 interface RawRow {
   id: string; content: string; type: string; tags: string; project: string; scope: string
   created_at: number; updated_at: number; access_count: number; last_accessed: number | null
   embedding: Buffer | null
+  anchor_path: string | null; anchor_hash: string | null
+  tokens_saved: number; tokens_spent: number
 }
 function rowToMemory(row: RawRow): Memory {
   return {
     id: row.id, content: row.content, type: row.type as MemoryType,
-    tags: JSON.parse(row.tags), project: row.project, scope: row.scope as 'project' | 'global',
+    tags: parseTags(row.tags), project: row.project, scope: row.scope as 'project' | 'global',
     created_at: row.created_at, updated_at: row.updated_at,
     access_count: row.access_count, last_accessed: row.last_accessed,
+    anchor_path: row.anchor_path ?? null, anchor_hash: row.anchor_hash ?? null,
+    tokens_saved: row.tokens_saved ?? 0, tokens_spent: row.tokens_spent ?? 0,
   }
 }

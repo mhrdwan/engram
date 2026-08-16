@@ -17,7 +17,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 
 function tmpDb(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cacheai-test-'))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'engram-test-'))
   return path.join(dir, 'test.db')
 }
 

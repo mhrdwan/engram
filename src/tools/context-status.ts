@@ -24,6 +24,8 @@ export function contextStatusHandler(project: string) {
             `Total memories: ${stats.total}`,
             `Sessions saved: ${stats.sessions}`,
             `Never accessed: ${stats.neverAccessed} (candidates for pruning)`,
+            `ROI ledger: saved ~${stats.tokensSaved.toLocaleString()} tok · spent ~${stats.tokensSpent.toLocaleString()} tok · net ~${stats.netTokens.toLocaleString()} tok`,
+            `Anchored: ${stats.anchored} (self-invalidating) · Stale now: ${stats.stale} ⚠️`,
             `By type:\n${byTypeStr}`,
           ].join('\n'),
         }],

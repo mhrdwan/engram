@@ -1,38 +1,93 @@
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
+import Database from 'better-sqlite3'
 
 export interface Config {
   projectDir: string
+  /** Nama project untuk ditampilkan (basename folder). */
   projectName: string
-  projectDbPath: string
-  globalDbPath: string
+  /** Kunci stabil yang dipakai sebagai kolom `project` di DB. */
+  projectKey: string
+  /** Unified DB — satu-satunya sumber kebenaran (lintas project). */
+  dbPath: string
+  /** DB per-project lama untuk dimigrasikan sekali (kalau ada). */
+  legacyDbPath: string
+}
+
+/** Baca env dengan nama Engram, fallback ke nama cacheAI lama (kompat). */
+function readEnv(name: string): string | undefined {
+  const v = process.env[`ENGRAM_${name}`]?.trim() || process.env[`CACHEAI_${name}`]?.trim()
+  return v || undefined
+}
+
+/**
+ * Migrasi satu kali store global dari lokasi cacheAI lama (~/.cacheai/memory.db)
+ * ke lokasi Engram (~/.engram/memory.db). Hanya jalan bila target belum ada.
+ */
+function migrateGlobalStore(newDbPath: string): void {
+  try {
+    if (fs.existsSync(newDbPath)) return
+    const oldDb = path.join(os.homedir(), '.cacheai', 'memory.db')
+    if (!fs.existsSync(oldDb)) return
+
+    // Fold WAL ke file utama dulu supaya menyalin satu file .db konsisten
+    // (menghindari pasangan WAL/main yang tidak sinkron kalau di-copy mentah).
+    try {
+      const old = new Database(oldDb)
+      old.pragma('wal_checkpoint(TRUNCATE)')
+      old.close()
+    } catch {
+      /* kalau tak bisa checkpoint (mis. terkunci proses lain), fallback copy mentah di bawah */
+    }
+
+    fs.copyFileSync(oldDb, newDbPath)
+    // Salin sisa WAL/SHM kalau checkpoint gagal (best-effort, tetap konsisten mayoritas kasus).
+    for (const suffix of ['-wal', '-shm']) {
+      const src = oldDb + suffix
+      if (fs.existsSync(src)) fs.copyFileSync(src, newDbPath + suffix)
+    }
+  } catch {
+    /* best-effort — jangan jatuhkan boot */
+  }
 }
 
 export function resolveConfig(projectArg?: string): Config {
-  // --project flag or cwd
+  // --project flag atau cwd
   const projectDir = projectArg
     ? path.resolve(projectArg)
     : process.cwd()
 
   const projectName = path.basename(projectDir)
 
-  // .cacheai/ inside project dir
-  const projectCacheDir = path.join(projectDir, '.cacheai')
-  if (!fs.existsSync(projectCacheDir)) {
-    fs.mkdirSync(projectCacheDir, { recursive: true })
+  // Kunci project: default basename, bisa dioverride via ENGRAM_PROJECT
+  // untuk menghindari tabrakan bila dua folder berbeda punya nama sama.
+  const projectKey = readEnv('PROJECT') || projectName
+
+  // ~/.engram/ — unified store. Bisa dioverride via ENGRAM_DB.
+  const globalDir = path.join(os.homedir(), '.engram')
+  if (!fs.existsSync(globalDir)) {
+    fs.mkdirSync(globalDir, { recursive: true })
+  }
+  const dbOverride = readEnv('DB')
+  const dbPath = dbOverride ? path.resolve(dbOverride) : path.join(globalDir, 'memory.db')
+  // Pastikan folder induk DB ada (override bisa menunjuk ke folder yang belum dibuat).
+  const dbDir = path.dirname(dbPath)
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true })
   }
 
-  // ~/.cacheai/ global
-  const globalCacheDir = path.join(os.homedir(), '.cacheai')
-  if (!fs.existsSync(globalCacheDir)) {
-    fs.mkdirSync(globalCacheDir, { recursive: true })
-  }
+  // Migrasi store cacheAI lama → Engram (sekali, hanya bila pakai lokasi default).
+  if (!dbOverride) migrateGlobalStore(dbPath)
+
+  // Lokasi DB per-project lama (era cacheAI v3) untuk migrasi satu kali.
+  const legacyDbPath = path.join(projectDir, '.cacheai', 'memory.db')
 
   return {
     projectDir,
     projectName,
-    projectDbPath: path.join(projectCacheDir, 'memory.db'),
-    globalDbPath: path.join(globalCacheDir, 'memory.db'),
+    projectKey,
+    dbPath,
+    legacyDbPath,
   }
 }

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * cacheAI Benchmark
+ * Engram Benchmark
  * Measures token usage for 3 scenarios:
  * 1. Naked   — raw bash output directly in context
  * 2. RTK     — compressed bash output via rtk
- * 3. cacheAI — recall from memory store (no bash output at all)
+ * 3. Engram — recall from memory store (no bash output at all)
  *
  * Token estimation: bytes / 4 (same method rtk uses)
  */
@@ -60,7 +60,7 @@ function row(label, naked, rtk, cache) {
 
 // ─── Setup temp DB ────────────────────────────────────────────────────────────
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cacheai-bench-'))
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'engram-bench-'))
 const dbPath = path.join(tmpDir, 'bench.db')
 openDb(dbPath)
 
@@ -75,7 +75,7 @@ const gitLogNaked = run('git -C /usr/local log --oneline -50 2>/dev/null || git 
 
 const gitLogRtk = run('rtk git log --oneline -50 2>/dev/null || echo "rtk fallback"')
 
-// cacheAI equivalent: store key facts, recall them
+// Engram equivalent: store key facts, recall them
 createMemory({ content: 'Last 50 commits: mostly bug fixes in auth, database, and frontend modules. Latest: v2.3.1 release, JWT refresh fix, Prisma migration cleanup.', type: 'fact', tags: ['git','history'], project: 'bench', scope: 'project' })
 const gitLogCache = searchMemories({ query: 'git log commits history', project: 'bench', scope: 'all' })
 const gitLogCacheStr = gitLogCache.map(m => m.content).join('\n')
@@ -87,7 +87,7 @@ const s1cache = tokens(gitLogCacheStr)
 row('git log -50', s1naked, s1rtk, s1cache)
 console.log(`  ${DIM}Naked raw: ${gitLogNaked.split('\n').length} lines → ${s1naked} tokens${RESET}`)
 console.log(`  ${DIM}RTK:       ${gitLogRtk.split('\n').length} lines → ${s1rtk} tokens${RESET}`)
-console.log(`  ${DIM}cacheAI:   1 recalled fact → ${s1cache} tokens${RESET}`)
+console.log(`  ${DIM}Engram:   1 recalled fact → ${s1cache} tokens${RESET}`)
 
 // ─── SCENARIO 2: npm install output ──────────────────────────────────────────
 
@@ -177,7 +177,7 @@ separator('SCENARIO 5: Cross-session context (sesi baru, project sama)')
 // Tanpa apa-apa: user harus brief ulang semua
 const nakedBrief = `
 User brief di awal sesi baru:
-"Kita lagi bikin cacheAI MCP server. Tech stack TypeScript + SQLite + MCP SDK v1.30.
+"Kita lagi bikin Engram MCP server. Tech stack TypeScript + SQLite + MCP SDK v1.30.
 FTS5 untuk search, bukan vector. Ada 5 tools: remember, recall, forget, list_memories, session_summary.
 Memory scope ada project dan global. Kemarin udah selesai build, 8/8 tests pass.
 Config udah ditambah ke opencode.json. Bug yang ketemu: SQL query pakai double-quote untuk string
@@ -187,10 +187,10 @@ literal SQLite padahal harusnya single-quote, udah difix. Next: benchmark token 
 // RTK: ga membantu untuk cross-session (RTK cuma compress output, bukan simpan memory)
 const rtkBrief = nakedBrief // RTK tidak bisa bantu cross-session
 
-// cacheAI: recall semua dari sesi sebelumnya
-createMemory({ content: 'Project: cacheAI MCP server. Status: SELESAI v0.1.0. 8/8 tests pass.', type: 'fact', tags: ['status'], project: 'bench', scope: 'project' })
+// Engram: recall semua dari sesi sebelumnya
+createMemory({ content: 'Project: Engram MCP server. Status: SELESAI v0.1.0. 8/8 tests pass.', type: 'fact', tags: ['status'], project: 'bench', scope: 'project' })
 createMemory({ content: 'Bug fix: SQL string literal di SQLite harus pakai single-quote bukan double-quote. Fixed di memory-store.ts.', type: 'bug', tags: ['sqlite','fix'], project: 'bench', scope: 'project' })
-createMemory({ content: 'Next step: benchmark token comparison RTK vs cacheAI vs tanpa apa-apa.', type: 'decision', tags: ['next'], project: 'bench', scope: 'project' })
+createMemory({ content: 'Next step: benchmark token comparison RTK vs Engram vs tanpa apa-apa.', type: 'decision', tags: ['next'], project: 'bench', scope: 'project' })
 
 const xsessCache = searchMemories({ query: 'project status stack tools next step', project: 'bench', scope: 'all', limit: 5 })
 const xsessCacheStr = xsessCache.map(m => `[${m.type}] ${m.content}`).join('\n')
@@ -201,7 +201,7 @@ const s5cache = tokens(xsessCacheStr)
 
 row('Cross-session recall', s5naked, s5rtk, s5cache)
 console.log(`  ${DIM}Naked/RTK: user harus brief manual → ${s5naked} tokens${RESET}`)
-console.log(`  ${DIM}cacheAI:   auto-recall dari DB → ${s5cache} tokens${RESET}`)
+console.log(`  ${DIM}Engram:   auto-recall dari DB → ${s5cache} tokens${RESET}`)
 console.log(`  ${DIM}Note: RTK tidak membantu cross-session (by design)${RESET}`)
 
 // ─── TOTAL SUMMARY ────────────────────────────────────────────────────────────
@@ -215,7 +215,7 @@ const totalCache = s1cache + s2cache + s3cache + s4cache + s5cache
 const combined = Math.round((totalNaked - Math.min(totalRtk, totalCache)) / 2 + Math.min(totalRtk, totalCache) * 0.5)
 
 console.log()
-console.log(`  ${'Scenario'.padEnd(28)} ${'Naked'.padStart(10)} ${'RTK'.padStart(12)} ${'cacheAI'.padStart(15)}`)
+console.log(`  ${'Scenario'.padEnd(28)} ${'Naked'.padStart(10)} ${'RTK'.padStart(12)} ${'Engram'.padStart(15)}`)
 console.log(`  ${'─'.repeat(68)}`)
 row('git log -50',         s1naked, s1rtk, s1cache)
 row('npm install',         s2naked, s2rtk, s2cache)
@@ -234,7 +234,7 @@ console.log()
 console.log(`${BOLD}  Kapan pakai apa:${RESET}`)
 console.log(`  ${RED}●${RESET} Naked     — jangan. Context habis cepat, lupa, brief ulang terus.`)
 console.log(`  ${YELLOW}●${RESET} RTK       — compress output bash. Terbaik untuk output command besar.`)
-console.log(`  ${GREEN}●${RESET} cacheAI   — persistent memory. Terbaik untuk cross-session, keputusan, facts.`)
+console.log(`  ${GREEN}●${RESET} Engram   — persistent memory. Terbaik untuk cross-session, keputusan, facts.`)
 console.log(`  ${CYAN}●${RESET} RTK+cache — keduanya. Output compressed + ingatan persisten = optimal.`)
 console.log()
 
