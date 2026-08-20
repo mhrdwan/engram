@@ -44,13 +44,22 @@ Anchored: 12 (self-invalidating) · Stale now: 1 ⚠️
 
 **Result:** memory that *cleans itself by value* and *corrects itself by staleness* — not a pile of dead notes.
 
+### 3. Zero-config auto-save 💾 (deterministic, no LLM, works for every user)
+A shell hook can't summarize a conversation — it can't see it. But it *can* capture what's provable. `engram init` installs a **`SessionEnd`** hook running `engram capture`: at the end of each session it parses the transcript and writes **one compact record** of what actually happened — files edited, commands run, commits made — with **zero LLM calls, zero API keys, zero tokens**.
+
+```
+Last session: [auto] add auto-save capture — edited 2 file(s): capture.ts, index.ts — 2 cmd(s) — commits: feat: auto-capture
+```
+
+**Token-frugal by construction:** it fires **once per session** (not per turn), skips sessions that changed nothing, dedups repeats, and relies on the ROI ledger above to keep the store — and every future load — bounded. The semantic *why* stays the model's job via `session_summary`; this just guarantees a floor of memory even when the model forgets.
+
 ---
 
 ## How it works
 
 ```
 Claude Code / any MCP client
-        │  (MCP tools + SessionStart hook)
+        │  (MCP tools + SessionStart/SessionEnd hooks)
         ▼
    Engram server (Node, stdio)
         │
@@ -63,6 +72,7 @@ Claude Code / any MCP client
 - **One unified DB**, partitioned by `project`; `global` memories are visible everywhere.
 - **Hybrid RAG**: semantic (vectors) + lexical (FTS5), reranked by relevance, recency, access, and type. If the embedding model is unavailable it **degrades to keyword-only** instead of failing.
 - **Auto-load**: a `SessionStart` hook injects the top memories + last session summary at the start of every session — no tool call, no re-reading files.
+- **Auto-save**: a `SessionEnd` hook (`engram capture`) writes one compact, deterministic session record at the end — files edited, commands run, commits — no LLM, no tokens.
 - **100% local & private.** No network, no API keys. The embedding model runs on-device.
 
 ### MCP tools

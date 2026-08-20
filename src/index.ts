@@ -5,6 +5,7 @@ import { openDb, migrateLegacyDb } from './store/db.js'
 import { getRecentContext } from './store/memory-store.js'
 import { warmupEmbedder } from './store/embedder.js'
 import { createServer } from './server.js'
+import { runCapture } from './capture.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -14,10 +15,10 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-function parseArgs(): { project?: string; command: 'serve' | 'init' | 'load' } {
+function parseArgs(): { project?: string; command: 'serve' | 'init' | 'load' | 'capture' } {
   const args = process.argv.slice(2)
   const first = args[0]
-  const command = first === 'init' ? 'init' : first === 'load' ? 'load' : 'serve'
+  const command = first === 'init' ? 'init' : first === 'load' ? 'load' : first === 'capture' ? 'capture' : 'serve'
   const idx = args.indexOf('--project')
   return { project: idx !== -1 ? args[idx + 1] : undefined, command }
 }
@@ -123,36 +124,43 @@ Do not re-analyze the whole project if Engram already knows the stack. Use your 
     }
   }
 
-  // 5. Pasang SessionStart hook di ~/.claude/settings.json → auto-inject memory
-  //    di awal tiap sesi (deterministik, hemat token, tidak bergantung model).
+  // 5. Pasang hook di ~/.claude/settings.json:
+  //    - SessionStart → `load`    (auto-inject memory di awal sesi)
+  //    - SessionEnd   → `capture` (auto-save record sesi ringkas & deterministik)
+  //    Keduanya tidak bergantung pada model & hemat token (sekali per sesi).
   try {
     const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
     const settings = fs.existsSync(settingsPath)
       ? JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
       : {}
     settings.hooks = settings.hooks || {}
-    const loadCmd = `${JSON.stringify(nodePath)} ${JSON.stringify(indexPath)} load --project .`
 
     type HookEntry = { hooks?: Array<{ type?: string; command?: string }> }
-    const sessionStart: HookEntry[] = Array.isArray(settings.hooks.SessionStart)
-      ? settings.hooks.SessionStart
-      : []
+    const cmdFor = (verb: string) =>
+      `${JSON.stringify(nodePath)} ${JSON.stringify(indexPath)} ${verb} --project .`
 
-    // Identifikasi hook milik Engram secara PRESISI (indexPath + " load"), bukan
-    // sekadar substring "engram" yang bisa mengenai hook lain. Selalu tulis ulang
-    // supaya path node yang basi (mis. ganti versi nvm) ikut ter-refresh.
-    const isOurs = (h: HookEntry) =>
-      Array.isArray(h?.hooks) &&
-      h.hooks.some(x => typeof x?.command === 'string' && x.command.includes(indexPath) && x.command.includes(' load'))
+    // Pasang/refresh satu hook Engram untuk sebuah event; identifikasi PRESISI
+    // via (indexPath + " <verb>") supaya tak menabrak hook lain & path node basi
+    // ikut ter-refresh. Return true bila sebelumnya sudah ada (refresh).
+    const upsert = (event: string, verb: string): boolean => {
+      const list: HookEntry[] = Array.isArray(settings.hooks[event]) ? settings.hooks[event] : []
+      const isOurs = (h: HookEntry) =>
+        Array.isArray(h?.hooks) &&
+        h.hooks.some(x => typeof x?.command === 'string' && x.command.includes(indexPath) && x.command.includes(` ${verb}`))
+      const others = list.filter(h => !isOurs(h))
+      const had = others.length !== list.length
+      others.push({ hooks: [{ type: 'command', command: cmdFor(verb) }] })
+      settings.hooks[event] = others
+      return had
+    }
 
-    const others = sessionStart.filter(h => !isOurs(h))
-    const hadOurs = others.length !== sessionStart.length
-    others.push({ hooks: [{ type: 'command', command: loadCmd }] })
-    settings.hooks.SessionStart = others
+    const hadLoad = upsert('SessionStart', 'load')
+    const hadCapture = upsert('SessionEnd', 'capture')
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
-    console.log(`✅ ${hadOurs ? 'Refreshed' : 'Installed'} SessionStart hook (auto-load memory) in settings.json`)
+    console.log(`✅ ${hadLoad ? 'Refreshed' : 'Installed'} SessionStart hook (auto-load memory)`)
+    console.log(`✅ ${hadCapture ? 'Refreshed' : 'Installed'} SessionEnd hook (auto-save session)`)
   } catch (e) {
-    console.error('❌ Failed to install SessionStart hook:', e)
+    console.error('❌ Failed to install hooks:', e)
   }
 
   console.log('\n🎉 Engram global initialization complete!')
@@ -171,6 +179,12 @@ async function main() {
   if (command === 'load') {
     runLoad(projectArg)
     return
+  }
+
+  if (command === 'capture') {
+    const config = bootStore(projectArg)
+    runCapture(config.projectKey)
+    process.exit(0)
   }
 
   const config = bootStore(projectArg)
