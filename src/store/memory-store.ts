@@ -320,6 +320,10 @@ export async function searchMemories(params: {
   }
 
   // 3. Score & rerank
+  // bm25 FTS5 bernilai NEGATIF dan makin negatif = makin cocok. Dinormalkan ke
+  // 0..1 terhadap kandidat terbaik supaya kata kunci memberi BONUS (dulu
+  // `Math.abs(rank) * -0.5` justru menghukum kecocokan terkuat).
+  const ftsTerbaik = candidates.reduce((min, c) => Math.min(min, c.fts_rank), 0)
   const nowTs = now()
   const scored = candidates.map(row => {
     let semanticScore = 0
@@ -331,10 +335,13 @@ export async function searchMemories(params: {
     const ageDays = Math.max(0, (nowTs - row.created_at) / DAY_MS)
     const recency = 1 / (1 + ageDays / 14)
 
+    const keyword = row.fts_rank < 0 && ftsTerbaik < 0 ? row.fts_rank / ftsTerbaik : 0
+
     const final_score = (
       (semanticScore * 50) +               // sinyal vektor kuat (0-1 * 50)
-      (Math.abs(row.fts_rank) * -0.5) +    // rank FTS (mendekati 0 lebih baik)
-      (row.access_count * 0.5) +           // frekuensi akses
+      (keyword * 25) +                     // kecocokan kata kunci (0-1 * 25)
+      (Math.log1p(row.access_count) * 0.5) + // frekuensi akses — dilog supaya catatan
+                                           // populer tak menenggelamkan yang tepat sasaran
       ((TYPE_WEIGHT[row.type] ?? 1) * 0.3) + // prioritas tipe
       (recency * 2)                        // sedikit dorongan untuk yang baru
     )
@@ -391,12 +398,16 @@ export function pruneMemories(params: {
 
   const cutoff = now() - maxAge
 
+  // Salinan memori bawaan Claude Code (tag cc-memory) dikecualikan: sumber
+  // kebenarannya berkas .md — membuangnya di sini hanya membuat catatan hilang
+  // sampai berkasnya berubah lagi.
   const result = db.prepare(`
     DELETE FROM memories
     WHERE project = ?
       AND access_count < ?
       AND created_at < ?
       AND type NOT IN ('decision', 'architecture')
+      AND tags NOT LIKE '%"cc-memory"%'
   `).run(project, keepMinAccess, cutoff)
 
   const total = (db.prepare('SELECT COUNT(*) as n FROM memories WHERE project = ?').get(project) as { n: number }).n
@@ -408,6 +419,7 @@ export function pruneMemories(params: {
     const rows = db.prepare(`
       SELECT id, type, access_count, created_at, tokens_saved, tokens_spent FROM memories
       WHERE project = ? AND type NOT IN ('decision', 'architecture')
+        AND tags NOT LIKE '%"cc-memory"%'
     `).all(project) as {
       id: string; type: string; access_count: number; created_at: number
       tokens_saved: number; tokens_spent: number
@@ -448,6 +460,35 @@ export function createSession(params: { project: string; summary: string; starte
 
 export function listSessions(project: string, limit = 10) {
   return getDb().prepare('SELECT * FROM sessions WHERE project = ? ORDER BY ended_at DESC LIMIT ?').all(project, limit)
+}
+
+/**
+ * Gabungkan semua catatan & sesi dari kunci project `from` ke `to` (mis. setelah
+ * kunci project berpindah ke akar git). Satu transaksi; return jumlah baris.
+ */
+export function mergeProject(from: string, to: string): { memories: number; sessions: number } {
+  if (!from || !to || from === to) return { memories: 0, sessions: 0 }
+  const db = getDb()
+  return db.transaction(() => {
+    const memories = db.prepare('UPDATE memories SET project = ? WHERE project = ?').run(to, from).changes
+    const sessions = db.prepare('UPDATE sessions SET project = ? WHERE project = ?').run(to, from).changes
+    return { memories, sessions }
+  })()
+}
+
+/** Offset byte transcript yang sudah di-capture (0 bila belum pernah). */
+export function getCaptureOffset(transcriptPath: string): number {
+  const row = getDb()
+    .prepare('SELECT offset FROM capture_offsets WHERE transcript_path = ?')
+    .get(transcriptPath) as { offset: number } | undefined
+  return row?.offset ?? 0
+}
+
+export function setCaptureOffset(transcriptPath: string, offset: number): void {
+  getDb().prepare(`
+    INSERT INTO capture_offsets (transcript_path, offset, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(transcript_path) DO UPDATE SET offset = excluded.offset, updated_at = excluded.updated_at
+  `).run(transcriptPath, offset, now())
 }
 
 export function getRecentContext(project: string): string | null {

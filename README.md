@@ -45,13 +45,26 @@ Anchored: 12 (self-invalidating) · Stale now: 1 ⚠️
 **Result:** memory that *cleans itself by value* and *corrects itself by staleness* — not a pile of dead notes.
 
 ### 3. Zero-config auto-save 💾 (deterministic, no LLM, works for every user)
-A shell hook can't summarize a conversation — it can't see it. But it *can* capture what's provable. `engram init` installs a **`SessionEnd`** hook running `engram capture`: at the end of each session it parses the transcript and writes **one compact record** of what actually happened — files edited, commands run, commits made — with **zero LLM calls, zero API keys, zero tokens**.
+A shell hook can't summarize a conversation — it can't see it. But it *can* capture what's provable. `engram init` installs Claude Code hooks that run `engram capture`, which parses the transcript and writes **one compact record** of what actually happened — the first *and last* human request, files edited, commands run, commits made — with **zero LLM calls, zero API keys, zero tokens**.
 
 ```
-Last session: [auto] add auto-save capture — edited 2 file(s): capture.ts, index.ts — 2 cmd(s) — commits: feat: auto-capture
+Last session: [auto] add auto-save capture → terakhir: fix the heredoc commit parser — edited 2 file(s): capture.ts, index.ts — 2 cmd(s) — commits: feat: auto-capture
 ```
 
-**Token-frugal by construction:** it fires **once per session** (not per turn), skips sessions that changed nothing, dedups repeats, and relies on the ROI ledger above to keep the store — and every future load — bounded. The semantic *why* stays the model's job via `session_summary`; this just guarantees a floor of memory even when the model forgets.
+| Hook | Runs | Why |
+|---|---|---|
+| `SessionStart` | `load` | inject top memories + last session record |
+| `PreCompact` | `capture` + `sync-memory` | long sessions that only ever compact (never end) are still captured |
+| `SessionEnd` | `capture` + `sync-memory` | capture the remainder of the session |
+| `Stop` | `sync-memory` | keep Claude Code's own memory files mirrored; exits in ~40 ms when nothing changed |
+
+- **Each transcript segment is captured once.** The byte offset already captured per transcript is stored in the DB, so repeated `PreCompact` + `SessionEnd` never write duplicates; a half-written last line is deferred.
+- **Harness noise is skipped** when picking requests: compact summaries (`isCompactSummary`), `<system-reminder>`, `<command-…>`, meta messages, tool results.
+- **Commit subjects** are read from `-m` (first one wins), `-m "$(cat <<'EOF' … EOF)"`, `-F -` with a heredoc, and `-F <file>`.
+
+**Claude Code's built-in memory is imported too.** Claude Code keeps its own notes in `~/.claude/projects/<slug>/memory/*.md` (indexed by `MEMORY.md`), and the model tends to write there instead of calling `remember`. `engram sync-memory` mirrors those files into Engram (`user`/`feedback` → `preference`, `project`/`reference` → `fact`; tagged `cc-memory`, anchored to the file so edits are detected by hash, deleted files are removed, `MEMORY.md` ignored) — so those notes become recallable from every other client. Run it manually with `engram sync-memory [--project <dir>] [--force]`.
+
+**Token-frugal by construction:** nothing is written for segments that changed nothing, repeats are deduped, and the ROI ledger above keeps the store — and every future load — bounded. The semantic *why* stays the model's job via `session_summary`; the MCP server's `instructions` tell every client to `recall` at the start of a task and `remember` decisions as they happen.
 
 ---
 
@@ -59,7 +72,7 @@ Last session: [auto] add auto-save capture — edited 2 file(s): capture.ts, ind
 
 ```
 Claude Code / any MCP client
-        │  (MCP tools + SessionStart/SessionEnd hooks)
+        │  (MCP tools + instructions; SessionStart/PreCompact/SessionEnd/Stop hooks)
         ▼
    Engram server (Node, stdio)
         │
@@ -69,10 +82,10 @@ Claude Code / any MCP client
         └── anchor hashes + ROI ledger      ← living memory
 ```
 
-- **One unified DB**, partitioned by `project`; `global` memories are visible everywhere.
+- **One unified DB**, partitioned by `project` = the basename of the **git root** (a session opened in `repo/service-a` lands under `repo`); `global` memories are visible everywhere.
 - **Hybrid RAG**: semantic (vectors) + lexical (FTS5), reranked by relevance, recency, access, and type. If the embedding model is unavailable it **degrades to keyword-only** instead of failing.
 - **Auto-load**: a `SessionStart` hook injects the top memories + last session summary at the start of every session — no tool call, no re-reading files.
-- **Auto-save**: a `SessionEnd` hook (`engram capture`) writes one compact, deterministic session record at the end — files edited, commands run, commits — no LLM, no tokens.
+- **Auto-save**: `PreCompact` + `SessionEnd` hooks (`engram capture`) write compact, deterministic session records — no LLM, no tokens — and `sync-memory` mirrors Claude Code's own memory files.
 - **100% local & private.** No network, no API keys. The embedding model runs on-device.
 
 ### MCP tools
@@ -95,17 +108,34 @@ git clone <this-repo> engram && cd engram
 npm install
 npm run build
 npm install -g .        # exposes `engram` / `engram-mcp`
-engram init             # registers the MCP server + installs the SessionStart auto-load hook
+engram init             # registers the MCP server in every installed client + installs hooks & rules
 ```
 
-`engram init` wires up Claude Code (`~/.claude.json`), Claude Desktop, and OpenCode automatically, and installs the auto-load hook in `~/.claude/settings.json`. Restart your agent and it will start each session already remembering.
+`engram init` registers Engram **only in clients that are installed**, idempotently (a second run changes nothing), backing up every file it modifies to `<file>.bak-engram` and writing atomically (temp file + rename, following symlinks, keeping file modes). Nothing else in those files is touched.
+
+| Client | File | What is written |
+|---|---|---|
+| Claude Code | `~/.claude.json` | `mcpServers.engram` |
+| Claude Code | `~/.claude/settings.json` | hooks above (non-Engram hooks untouched) + `~/.claude/skills/engram/SKILL.md` |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers.engram` |
+| Codex | `~/.codex/config.toml` | `[mcp_servers.engram]` (text edit — comments preserved) |
+| Codex | `~/.codex/AGENTS.md` | rules block |
+| Cursor | `~/.cursor/mcp.json` | `mcpServers.engram` |
+| Gemini CLI | `~/.gemini/settings.json` (only if it exists) | `mcpServers.engram` |
+| Antigravity | `~/.gemini/antigravity/mcp_config.json`, `~/.gemini/antigravity-ide/mcp_config.json` | `mcpServers.engram` |
+| Gemini CLI / Antigravity | `~/.gemini/GEMINI.md` | rules block |
+| OpenCode | `~/.config/opencode/opencode.json` | `mcp.engram = { type: "local", command: [...], enabled: true }` (`.jsonc` is left alone) |
+
+The rules block lives between `<!-- engram:start -->` and `<!-- engram:end -->`: it is replaced in place on re-run and appended if missing; the rest of the file is never modified. Restart your agents afterwards.
+
+Other commands: `engram sync-memory` (see above) and `engram merge-project <from> <to>` (moves memories + sessions between project keys, after taking a consistent DB backup to `memory.db.bak-<date>`).
 
 ### Config (env)
 
 | Var | Meaning |
 |---|---|
 | `ENGRAM_DB` | Override the store path (default `~/.engram/memory.db`). |
-| `ENGRAM_PROJECT` | Override the project key (default: folder basename). |
+| `ENGRAM_PROJECT` | Override the project key (default: basename of the git root, else of the folder). |
 | `ENGRAM_NO_EMBED=1` | Keyword-only mode (skip the vector model — fastest, offline-safe). |
 
 > Upgrading from `cacheAI`? Engram auto-migrates your old `~/.cacheai` store and model cache on first run. `CACHEAI_*` env vars still work as fallbacks.

@@ -52,15 +52,37 @@ function migrateGlobalStore(newDbPath: string): void {
   }
 }
 
+/**
+ * Cari akar repo git dengan naik direktori mencari `.git` (folder ATAU berkas —
+ * worktree & submodule memakai berkas `.git`). Tanpa spawn `git` supaya murah
+ * di jalur hook. Null bila tidak di dalam repo git. Tidak pernah melempar.
+ */
+export function findGitRoot(startDir: string): string | null {
+  try {
+    let dir = path.resolve(startDir)
+    for (;;) {
+      if (fs.existsSync(path.join(dir, '.git'))) return dir
+      const parent = path.dirname(dir)
+      if (parent === dir) return null
+      dir = parent
+    }
+  } catch {
+    return null
+  }
+}
+
 export function resolveConfig(projectArg?: string): Config {
   // --project flag atau cwd
   const projectDir = projectArg
     ? path.resolve(projectArg)
     : process.cwd()
 
-  const projectName = path.basename(projectDir)
+  // Nama project = basename AKAR GIT (bukan folder saat ini) supaya sesi yang
+  // dibuka di subfolder (mis. API/order-service) tidak memecah catatan satu repo
+  // ke banyak kunci. Di luar repo git → basename folder seperti dulu.
+  const projectName = path.basename(findGitRoot(projectDir) ?? projectDir)
 
-  // Kunci project: default basename, bisa dioverride via ENGRAM_PROJECT
+  // Kunci project: default nama di atas, bisa dioverride via ENGRAM_PROJECT
   // untuk menghindari tabrakan bila dua folder berbeda punya nama sama.
   const projectKey = readEnv('PROJECT') || projectName
 

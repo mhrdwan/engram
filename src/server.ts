@@ -5,12 +5,15 @@ import { forgetSchema, forgetHandler } from './tools/forget.js'
 import { listMemoriesSchema, listMemoriesHandler } from './tools/list.js'
 import { sessionSummarySchema, sessionSummaryHandler } from './tools/session-summary.js'
 import { contextStatusSchema, contextStatusHandler } from './tools/context-status.js'
+import { ENGRAM_INSTRUCTIONS } from './instructions.js'
 
 export function createServer(project: string): McpServer {
-  const server = new McpServer({
-    name: 'engram-mcp',
-    version: '1.0.0',
-  })
+  // `instructions` berlaku untuk SEMUA klien MCP: tanpa ini model tak punya
+  // alasan memakai Engram dan memilih memori bawaan kliennya sendiri.
+  const server = new McpServer(
+    { name: 'engram-mcp', version: '1.0.0' },
+    { instructions: ENGRAM_INSTRUCTIONS }
+  )
 
   server.registerTool(
     'remember',

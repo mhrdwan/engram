@@ -29,6 +29,15 @@ const SCHEMA = `
     ended_at    INTEGER NOT NULL
   );
 
+  -- Offset byte terakhir yang sudah di-capture per transcript, supaya hook
+  -- PreCompact yang terpicu berkali-kali (lalu SessionEnd) tidak menulis ulang
+  -- bagian transcript yang sama.
+  CREATE TABLE IF NOT EXISTS capture_offsets (
+    transcript_path TEXT PRIMARY KEY,
+    offset          INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+  );
+
   CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     id UNINDEXED,
     content,
